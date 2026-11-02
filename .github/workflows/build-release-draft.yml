@@ -40,14 +40,6 @@ jobs:
           include-hidden-files: true  
           archive: false
 
-      - name: Upload Sources
-        uses: actions/upload-artifact@v7
-        with:
-          name: extension-sources
-          path: .output/*-sources.zip
-          include-hidden-files: true  
-          archive: false
-
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3
         with:
@@ -58,4 +50,3 @@ jobs:
           files: |
             .output/*-chrome.zip
             .output/*-firefox.zip
-            .output/*-sources.zip
