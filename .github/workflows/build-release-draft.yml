@@ -25,14 +25,13 @@ jobs:
           bun zip:firefox
 
       - name: Create Draft Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
           tag_name: v0.0.${{ github.run_number }}
-          title: Release v0.0.${{ github.run_number }}
+          name: Release v0.0.${{ github.run_number }}
           files: |
             .output/*-chrome.zip
             .output/*-firefox.zip
             .output/*-sources.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
