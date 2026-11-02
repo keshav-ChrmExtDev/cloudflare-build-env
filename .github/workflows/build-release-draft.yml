@@ -23,6 +23,15 @@ jobs:
         run: |
           bun zip
           bun zip:firefox
+          
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: extension-builds
+          path: |
+            .output/*-chrome.zip
+            .output/*-firefox.zip
+            .output/*-sources.zip
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3
