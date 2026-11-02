@@ -29,6 +29,7 @@ jobs:
         with:
           name: extension-builds
           path: .output/*.zip
+          include-hidden-files: true
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3
