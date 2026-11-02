@@ -76,57 +76,74 @@ function findCard(): HTMLElement | null {
 }
 
 function getRows(card: HTMLElement): Row[] {
-  // Try known name-input selectors. Cloudflare has used several across dashboard versions.
+  // Try known name-input selectors across Cloudflare dashboard versions.
   const nameInputs = [
     ...card.querySelectorAll<HTMLInputElement>(
       [
-        'input[id^="buildvar-key"]',      // older dashboard
-        'input[placeholder="Name"]',       // older dashboard
-        'input[data-kumo-part="input"][placeholder*="name" i]', // Kumo design system
-        'input[data-kumo-part="input"][aria-label*="name" i]',  // Kumo design system
+        'input[id^="buildvar-key"]',
+        'input[placeholder="Name"]',
+        'input[placeholder="Variable name" i]',
+        'input[placeholder*="name" i]',
+        'input[aria-label*="name" i]',
+        'input[data-kumo-part="input"][placeholder*="name" i]',
+        'input[data-kumo-part="input"][aria-label*="name" i]',
       ].join(', '),
     ),
   ];
   const rows: Row[] = [];
 
   for (const name of nameInputs) {
-    // Walk up to the row container — try every known wrapper component name.
+    // Walk up to the row container — try known wrapper component markers.
     const el =
       name.closest<HTMLElement>(BUILD_ROW) ??
       name.closest<HTMLElement>('[data-sentry-component="InlineEditorRow"]') ??
       name.closest<HTMLElement>('[data-sentry-component="KumoBuildVariableEditorRow"]') ??
       name.closest<HTMLElement>('[data-kumo-component="InlineEditor"]') ??
-      // Fallback: the nearest ancestor that also contains a value input.
+      // Fallback: the nearest ancestor containing both this input and a value input.
       ((): HTMLElement | null => {
-        let el: HTMLElement | null = name.parentElement;
-        while (el && el !== card) {
+        let parent: HTMLElement | null = name.parentElement;
+        while (parent && parent !== card) {
           if (
-            el.querySelector('input[id^="buildvar-value"], input[placeholder="Value"], input[data-kumo-part="input"]:not([id^="buildvar-key"])')
-          )
-            return el;
-          el = el.parentElement;
+            parent.querySelector(
+              'input[id^="buildvar-value"], input[placeholder="Value"], input[placeholder*="value" i], input[data-kumo-part="input"]:not(:first-of-type)',
+            )
+          ) {
+            return parent;
+          }
+          parent = parent.parentElement;
         }
         return null;
       })();
     if (!el) continue;
 
     const value = el.querySelector<HTMLInputElement>(
-      'input[id^="buildvar-value"], input[placeholder="Value"], input[data-kumo-part="input"]:not(:first-of-type)',
+      [
+        'input[id^="buildvar-value"]',
+        'input[placeholder="Value"]',
+        'input[placeholder*="value" i]',
+        'input[aria-label*="value" i]',
+        'input[data-kumo-part="input"]:not(:first-of-type)',
+      ].join(', '),
     );
 
-    // Type toggle — try aria-label then data-kumo-component select triggers.
+    // Type toggle button (Secret vs Variable)
     const typeButton =
       el.querySelector<HTMLButtonElement>('button[aria-label="Type"]') ??
+      el.querySelector<HTMLButtonElement>('button[aria-label*="type" i]') ??
       el.querySelector<HTMLButtonElement>('[data-kumo-component="Select"] button') ??
-      el.querySelector<HTMLButtonElement>('button[data-kumo-part="trigger"]');
+      el.querySelector<HTMLButtonElement>('button[data-kumo-part="trigger"]') ??
+      [...el.querySelectorAll<HTMLButtonElement>('button')].find((b) =>
+        /^(secret|variable|plain|encrypted)/i.test(b.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+      ) ??
+      null;
 
-    // Delete button — try aria-label then icon-only buttons at the end of the row.
+    // Delete / remove button
     const deleteButton =
       el.querySelector<HTMLButtonElement>('button[aria-label="Delete"]') ??
       el.querySelector<HTMLButtonElement>('button[aria-label*="delete" i]') ??
       el.querySelector<HTMLButtonElement>('button[aria-label*="remove" i]') ??
       [...el.querySelectorAll<HTMLButtonElement>('button')].find(
-        (b) => isVisible(b) && b.textContent?.trim() === '',
+        (b) => isVisible(b) && b !== typeButton && b.textContent?.trim() === '',
       ) ??
       null;
 
@@ -139,49 +156,72 @@ function getRows(card: HTMLElement): Row[] {
 }
 
 function getAddButton(card: HTMLElement): HTMLButtonElement | null {
-  // Old dashboard: dedicated footer component.
+  // Empty state row button (e.g. SettingsEmptyRow)
+  const emptyRowBtn = card.querySelector<HTMLButtonElement>(
+    '[data-sentry-component="SettingsEmptyRow"] button, [data-kumo-component="Button"]',
+  );
+  if (emptyRowBtn && isVisible(emptyRowBtn)) {
+    const text = emptyRowBtn.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    if (/^add(\s+(row|variable|secret))?$/i.test(text)) return emptyRowBtn;
+  }
+
+  // Old dashboard dedicated footer component
   const footer = card.querySelector<HTMLButtonElement>('[data-sentry-component="AddRowFooter"] button');
   if (footer && isVisible(footer)) return footer;
 
-  // Normalise textContent: strip whitespace from nested spans/SVGs.
-  const label = (btn: HTMLButtonElement) =>
-    btn.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-
+  // Normalized search across all visible buttons in the card
   return (
     [...card.querySelectorAll<HTMLButtonElement>('button')].find((btn) => {
-      if (!isVisible(btn)) return false;
-      const text = label(btn);
-      return text === 'Add' || text === 'Add row' || text === 'Add variable';
+      if (!isVisible(btn) || btn.disabled) return false;
+      const text = btn.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      const aria = btn.getAttribute('aria-label') ?? '';
+      return /^add(\s+(row|variable|secret))?$/i.test(text) || /^add(\s+(row|variable|secret))?$/i.test(aria);
     }) ?? null
   );
 }
 
 function setInput(input: HTMLInputElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-  if (setter) setter.call(input, value);
-  else input.value = value;
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.focus();
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  if (setter) {
+    setter.call(input, value);
+  } else {
+    input.value = value;
+  }
+  // Reset React / virtual DOM value tracker if present so synthetic change detection fires reliably
+  const tracker = (input as unknown as { _valueTracker?: { setValue: (v: string) => void } })._valueTracker;
+  if (tracker) {
+    tracker.setValue('');
+  }
+  input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 }
 
 async function setType(row: Row, secret: boolean) {
   const wanted = secret ? 'Secret' : 'Variable';
-  if ((row.typeButton.textContent?.trim() ?? '').startsWith(wanted)) return;
+  const current = row.typeButton.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  if (new RegExp(`^${wanted}`, 'i').test(current)) return;
 
   row.typeButton.click();
   const option = await waitFor(
     () =>
-      [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
-        (el) => isVisible(el) && (el.textContent?.trim() ?? '').startsWith(wanted),
+      [...document.querySelectorAll<HTMLElement>('[role="option"], [data-kumo-component="Option"], [role="menuitem"]')].find(
+        (el) => isVisible(el) && new RegExp(`^${wanted}`, 'i').test(el.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
       ),
     2500,
     50,
   );
-  if (!option) throw new Error(`Could not open the type menu to choose ${wanted}.`);
+  if (!option) throw new Error(`Could not find the dropdown option for ${wanted}.`);
 
+  // Dispatch full pointer event sequence for Base UI / Radix triggers
+  option.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true, composed: true }));
+  option.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, composed: true }));
   option.click();
+
   const changed = await waitFor(
-    () => (row.typeButton.textContent?.trim() ?? '').startsWith(wanted),
+    () => new RegExp(`^${wanted}`, 'i').test(row.typeButton.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
     1500,
     50,
   );
@@ -191,7 +231,7 @@ async function setType(row: Row, secret: boolean) {
 async function confirmDelete(log: (line: string) => void): Promise<boolean> {
   const dialog = await waitFor(
     () =>
-      [...document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"]')].find(
+      [...document.querySelectorAll<HTMLElement>('[role="dialog"], [role="alertdialog"], [data-kumo-component="Dialog"]')].find(
         isVisible,
       ),
     1500,
@@ -203,12 +243,12 @@ async function confirmDelete(log: (line: string) => void): Promise<boolean> {
     (candidate) =>
       isVisible(candidate) &&
       !candidate.disabled &&
-      /^(delete|remove|confirm|yes)/i.test(candidate.textContent?.trim() ?? ''),
+      /^(delete|remove|confirm|yes|ok|proceed)/i.test(candidate.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
   );
   if (!button) return false;
 
   button.click();
-  log('Confirmed deletion');
+  log('Confirmed deletion in dialog');
   await sleep(250);
   return true;
 }
@@ -219,7 +259,8 @@ async function deleteAll(card: HTMLElement, log: (line: string) => void): Promis
     const named = getRows(card).filter((row) => row.name.value.trim() !== '');
     if (named.length === 0) return deleted;
 
-    const target = named[named.length - 1]!;
+    const target = named[named.length - 1];
+    if (!target) return deleted;
     const name = target.name.value.trim();
     const before = named.length;
 
@@ -239,14 +280,15 @@ async function deleteAll(card: HTMLElement, log: (line: string) => void): Promis
       );
       if (!gone) {
         throw new Error(
-          `Could not delete “${name}”. Finish the dialog in Cloudflare, then try again.`,
+          `Could not delete “${name}”. Complete the confirmation dialog in Cloudflare, then try again.`,
         );
       }
     }
     log(`Deleted ${name}`);
     deleted++;
+    await sleep(50);
   }
-  throw new Error('Stopped after deleting 250 variables.');
+  throw new Error('Stopped after deleting 250 variables to protect against runaway loops.');
 }
 
 async function addRows(
@@ -267,13 +309,15 @@ async function addRows(
       add.click();
       const created = await waitFor(() => getRows(card).length > before, 4000, 100);
       if (!created) throw new Error('The Add button did not create a new row.');
-      row = getRows(card).at(-1)!;
+      const lastRow = getRows(card).at(-1);
+      if (!lastRow) throw new Error('Could not find newly created row in Variables and secrets.');
+      row = lastRow;
     }
 
     await setType(row, variable.is_secret);
     setInput(row.name, variable.var_name);
     setInput(row.value, variable.value);
-    await sleep(40);
+    await sleep(50);
 
     if (row.name.value !== variable.var_name) {
       throw new Error(`Could not type the name ${variable.var_name}.`);

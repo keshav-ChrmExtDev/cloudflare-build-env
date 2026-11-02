@@ -44,6 +44,7 @@ body {
 .bar {
   padding: 9px 16px;
   background: var(--ground);
+  border-bottom: 1px solid var(--line);
 }
 
 .bar h1 {
@@ -56,7 +57,24 @@ body {
 .grid {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.grid:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.grid::-webkit-scrollbar {
+  width: 6px;
+}
+
+.grid::-webkit-scrollbar-thumb {
+  background-color: var(--line);
+  border-radius: 3px;
 }
 
 table {
@@ -158,6 +176,9 @@ tbody tr.selected td.check-cell input {
   background: transparent;
   color: var(--ink);
   font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cell::placeholder {
@@ -199,11 +220,17 @@ tbody tr.selected td.check-cell input {
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.remove:hover {
+.remove:hover:not(:disabled) {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+.remove:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
 }
 
 .footer {
@@ -212,6 +239,7 @@ tbody tr.selected td.check-cell input {
   gap: 7px;
   padding: 9px 16px 10px;
   background: var(--ground);
+  border-top: 1px solid var(--line);
 }
 
 .note {
@@ -222,6 +250,7 @@ tbody tr.selected td.check-cell input {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: default;
 }
 
 .note[data-tone="ok"] {
@@ -289,10 +318,15 @@ tbody tr.selected td.check-cell input {
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
+  transition: background-color 140ms ease, opacity 140ms ease, transform 80ms ease;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--hover);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .btn:disabled {
@@ -347,10 +381,12 @@ tbody tr.selected td.check-cell input {
 .overlay {
   position: fixed;
   inset: 0;
+  z-index: 100;
   display: grid;
   place-items: center;
   padding: 24px;
-  background: light-dark(rgb(20 18 16 / 0.35), rgb(0 0 0 / 0.55));
+  background: light-dark(rgb(20 18 16 / 0.4), rgb(0 0 0 / 0.65));
+  backdrop-filter: blur(2px);
 }
 
 .dialog {
@@ -359,6 +395,7 @@ tbody tr.selected td.check-cell input {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 12px 32px light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.5));
+  border: 1px solid var(--line);
 }
 
 .dialog h2 {
@@ -391,4 +428,29 @@ tbody tr.selected td.check-cell input {
   clip: rect(0 0 0 0);
   white-space: nowrap;
   border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .btn,
+  .dialog,
+  th,
+  td,
+  .cell {
+    forced-color-adjust: none;
+    border: 1px solid ButtonText;
+  }
+  .btn.primary {
+    background: Highlight;
+    color: HighlightText;
+  }
 }

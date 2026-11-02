@@ -21,47 +21,68 @@
   let connected: boolean = $state(false);
   let syncing: boolean = $state(false);
   let confirmAction: 'sync' | 'clear' | null = $state(null);
-  let note: Note = $state({ text: 'Open the Cloudflare Workers build settings page first.', tone: 'neutral' });
+  let note: Note = $state({ text: 'Open the Cloudflare build settings page first.', tone: 'neutral' });
+
+  let triggerEl: HTMLElement | null = null;
+  let dialogEl: HTMLDivElement | null = $state(null);
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
   const payload = $derived(toPayload(rows));
   const issues = $derived(validateRows(rows));
-  const allSelected = $derived(
-    rows.length > 0 && selected.length === rows.length,
-  );
+  const allSelected = $derived(rows.length > 0 && selected.length === rows.length);
+  const firstIssue = $derived(issues[0] ?? null);
+  const canSync = $derived(connected && !syncing && issues.length === 0 && payload.length > 0);
 
   // ── Ping loop ──────────────────────────────────────────────────────────────
 
+  let pingController: AbortController | null = null;
+
   async function ping() {
+    pingController?.abort();
+    pingController = new AbortController();
+
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) {
         connected = false;
-        note = { text: 'Open the Cloudflare Workers build settings page first.', tone: 'neutral' };
+        note = { text: 'Open the Cloudflare build settings page first.', tone: 'neutral' };
         return;
       }
+
       const response: CfResponse = await browser.tabs.sendMessage(tab.id, { type: 'cf-ping' });
+      if (pingController.signal.aborted) return;
+
       connected = response.found;
       if (response.found) {
-        note = { text: `Connected · ${response.rows} row${response.rows === 1 ? '' : 's'} on page`, tone: 'ok' };
+        const r = response.rows;
+        note = { text: `Connected · ${r} ${r === 1 ? 'row' : 'rows'} on page`, tone: 'ok' };
       } else {
         note = { text: 'Navigate to Workers → Settings → Build variables.', tone: 'neutral' };
       }
     } catch {
+      if (pingController.signal.aborted) return;
       connected = false;
-      note = { text: 'Open the Cloudflare Workers build settings page first.', tone: 'neutral' };
+      if (!syncing) {
+        note = { text: 'Open the Cloudflare build settings page first.', tone: 'neutral' };
+      }
     }
   }
 
-  // Run once on mount and whenever the popup gains focus.
   $effect(() => {
     void ping();
-    const interval = setInterval(ping, 3000);
-    return () => clearInterval(interval);
+    const id = setInterval(ping, 3000);
+    const onFocus = () => void ping();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      pingController?.abort();
+    };
   });
 
-  // Listen for progress messages pushed from the content script.
+  // ── Progress messages from content script ─────────────────────────────────
+
   $effect(() => {
     function onMessage(message: unknown) {
       if (
@@ -80,35 +101,53 @@
 
   // ── Storage ────────────────────────────────────────────────────────────────
 
+  let storageReady = false;
+
   $effect(() => {
     browser.storage.local.get('rows').then((data) => {
+      storageReady = true;
       if (Array.isArray(data.rows) && data.rows.length > 0) {
-        rows = [...data.rows, { var_name: '', value: '', is_secret: false }];
+        const valid = (data.rows as unknown[]).filter(
+          (r): r is EnvVar =>
+            r !== null &&
+            typeof r === 'object' &&
+            typeof (r as EnvVar).var_name === 'string' &&
+            typeof (r as EnvVar).value === 'string' &&
+            typeof (r as EnvVar).is_secret === 'boolean',
+        );
+        if (valid.length > 0) {
+          rows = [...valid, { var_name: '', value: '', is_secret: false }];
+        }
       }
     });
   });
 
   function persist() {
+    if (!storageReady) return;
     const saved = rows.filter((r) => r.var_name.trim() !== '' || r.value !== '');
     browser.storage.local.set({ rows: saved });
   }
 
   // ── Row management ─────────────────────────────────────────────────────────
 
-  function onCellInput(index: number) {
-    // Ensure there is always a blank draft at the end.
-    if (index === rows.length - 1 && (rows[index]!.var_name !== '' || rows[index]!.value !== '')) {
+  function ensureDraft() {
+    const last = rows[rows.length - 1];
+    if (!last || last.var_name !== '' || last.value !== '') {
       rows = [...rows, { var_name: '', value: '', is_secret: false }];
     }
+  }
+
+  function onCellInput(index: number) {
+    if (index === rows.length - 1) ensureDraft();
     persist();
   }
 
   function removeRow(index: number) {
-    // Never remove the last remaining blank draft.
     if (rows.length === 1) {
       rows = [{ var_name: '', value: '', is_secret: false }];
     } else {
       rows = rows.filter((_, i) => i !== index);
+      ensureDraft();
     }
     selected = selected.filter((i) => i !== index).map((i) => (i > index ? i - 1 : i));
     persist();
@@ -127,11 +166,8 @@
   function deleteSelected() {
     const keep = new Set(selected);
     const next = rows.filter((_, i) => !keep.has(i));
-    // Ensure there's always at least one blank draft row.
-    if (next.length === 0 || next[next.length - 1]!.var_name !== '' || next[next.length - 1]!.value !== '') {
-      next.push({ var_name: '', value: '', is_secret: false });
-    }
     rows = next;
+    ensureDraft();
     selected = [];
     persist();
   }
@@ -145,25 +181,99 @@
   function handlePaste(event: ClipboardEvent, index: number) {
     const text = event.clipboardData?.getData('text') ?? '';
     const parsed = parsePaste(text);
-    if (!parsed) return; // Let the browser paste normally.
+    if (!parsed) return;
     event.preventDefault();
 
     const before = rows.slice(0, index);
     const after = rows.slice(index + 1);
     const merged = mergeEnv([...before, ...after], parsed);
-    // Always keep a blank draft at the end.
-    if (merged.length === 0 || merged[merged.length - 1]!.var_name !== '' || merged[merged.length - 1]!.value !== '') {
-      merged.push({ var_name: '', value: '', is_secret: false });
-    }
     rows = merged;
+    ensureDraft();
     selected = [];
     persist();
   }
 
+  function handleGridPaste(event: ClipboardEvent) {
+    if ((event.target as HTMLElement)?.tagName === 'INPUT') return;
+    const text = event.clipboardData?.getData('text') ?? '';
+    const parsed = parsePaste(text);
+    if (!parsed) return;
+    event.preventDefault();
+    rows = mergeEnv(rows, parsed);
+    ensureDraft();
+    selected = [];
+    persist();
+  }
+
+  // ── Keyboard shortcuts ─────────────────────────────────────────────────────
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && confirmAction) {
+      event.preventDefault();
+      cancelConfirm();
+      return;
+    }
+
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      if (confirmAction) {
+        void confirm();
+      } else if (canSync) {
+        openConfirm('sync');
+      }
+    }
+  }
+
   // ── Confirm dialog ─────────────────────────────────────────────────────────
 
+  function openConfirm(action: 'sync' | 'clear') {
+    triggerEl = document.activeElement as HTMLElement | null;
+    confirmAction = action;
+  }
+
+  function cancelConfirm() {
+    confirmAction = null;
+    setTimeout(() => triggerEl?.focus(), 0);
+  }
+
+  function trapFocus(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      // Allow Enter to trigger confirm when inside dialog
+      event.preventDefault();
+      void confirm();
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+    const dialog = event.currentTarget as HTMLElement;
+    const focusable = [...dialog.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )].filter((el) => !el.hasAttribute('disabled'));
+    if (focusable.length === 0) return;
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    if (event.shiftKey) {
+      if (document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
+  $effect(() => {
+    if (confirmAction && dialogEl) {
+      const primaryBtn = dialogEl.querySelector<HTMLElement>('button.primary, button.danger');
+      primaryBtn?.focus();
+    }
+  });
+
   async function confirm() {
-    if (!confirmAction) return;
+    if (!confirmAction || syncing) return;
     const action = confirmAction;
     confirmAction = null;
     syncing = true;
@@ -171,25 +281,26 @@
 
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) throw new Error('No active tab found.');
+      if (!tab?.id) throw new Error('No active Cloudflare tab found.');
 
-      let response: CfResponse;
+      const request =
+        action === 'clear'
+          ? { type: 'cf-clear' as const, vars: [] as EnvVar[] }
+          : { type: 'cf-sync' as const, vars: payload };
 
-      if (action === 'clear') {
-        response = await browser.tabs.sendMessage(tab.id, { type: 'cf-clear', vars: [] });
-      } else {
-        response = await browser.tabs.sendMessage(tab.id, { type: 'cf-sync', vars: payload });
-      }
+      const response: CfResponse = await browser.tabs.sendMessage(tab.id, request);
 
       if (!response.ok) {
-        note = { text: response.error ?? 'Unknown error.', tone: 'error' };
+        note = { text: response.error ?? 'Something went wrong. Try again.', tone: 'error' };
       } else if (response.warning) {
         note = { text: response.warning, tone: 'error' };
       } else {
+        const n = payload.length;
         note = {
-          text: action === 'clear'
-            ? 'Cleared all variables.'
-            : `Synced ${payload.length} variable${payload.length === 1 ? '' : 's'}.`,
+          text:
+            action === 'clear'
+              ? 'Cleared — remember to save in Cloudflare.'
+              : `Filled ${n} ${n === 1 ? 'variable' : 'variables'} — review and save in Cloudflare.`,
           tone: 'ok',
         };
         if (action === 'clear') {
@@ -199,24 +310,32 @@
         }
       }
     } catch (err) {
-      note = { text: err instanceof Error ? err.message : 'Operation failed.', tone: 'error' };
+      const msg = err instanceof Error ? err.message : 'Operation failed.';
+      note = { text: msg, tone: 'error' };
     } finally {
       syncing = false;
+      setTimeout(() => triggerEl?.focus(), 0);
     }
   }
-
-  function cancelConfirm() {
-    confirmAction = null;
-  }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <main class="app">
   <header class="bar">
     <h1>Build env</h1>
   </header>
 
-  <div class="grid">
-    <table>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="grid"
+    aria-label="Environment variables table"
+    role="region"
+    tabindex="0"
+    onpaste={handleGridPaste}
+  >
+    <table aria-label="Build variables">
       <thead>
         <tr>
           <th scope="col">
@@ -225,7 +344,7 @@
               checked={allSelected}
               indeterminate={selected.length > 0 && !allSelected}
               onchange={toggleAll}
-              aria-label="Select all rows"
+              aria-label={allSelected ? 'Deselect all rows' : 'Select all rows'}
             />
           </th>
           <th scope="col">Name</th>
@@ -240,12 +359,11 @@
           {@const invalid = trimmed !== '' && !NAME_RE.test(trimmed)}
           {@const duplicate =
             trimmed !== '' && rows.some((other, i) => i !== index && other.var_name.trim() === trimmed)}
+          {@const isDraft = index === rows.length - 1 && trimmed === '' && row.value === ''}
           <tr
             class:selected={selected.includes(index)}
             class:hover={!selected.includes(index)}
-            onauxclick={() => {
-              toggleSecret([index]);
-            }}
+            onauxclick={() => toggleSecret([index])}
             oncontextmenu={(event) => {
               event.preventDefault();
               selected = [index];
@@ -259,6 +377,7 @@
                 onclick={(e) => e.stopPropagation()}
                 onchange={() => selectRow(index)}
                 aria-label={`Select ${trimmed || `row ${index + 1}`}`}
+                disabled={isDraft}
               />
             </td>
             <td>
@@ -268,13 +387,24 @@
                 bind:value={row.var_name}
                 oninput={() => onCellInput(index)}
                 onpaste={(event) => handlePaste(event, index)}
-                placeholder={index === rows.length - 1 ? 'Paste .env or type NAME' : 'NAME'}
+                placeholder={isDraft ? 'Paste .env or type NAME' : 'NAME'}
                 aria-label={`Name, row ${index + 1}`}
-                aria-invalid={invalid || duplicate}
+                aria-invalid={invalid || duplicate || undefined}
+                aria-errormessage={invalid ? `err-name-${index}` : duplicate ? `err-dup-${index}` : undefined}
                 autocapitalize="off"
                 autocomplete="off"
                 spellcheck="false"
+                maxlength={255}
               />
+              {#if invalid}
+                <span id="err-name-{index}" class="sr-only" role="alert">
+                  Invalid name: use letters, digits, and underscores only.
+                </span>
+              {:else if duplicate}
+                <span id="err-dup-{index}" class="sr-only" role="alert">
+                  Duplicate name — each variable name must be unique.
+                </span>
+              {/if}
             </td>
             <td>
               <input
@@ -287,6 +417,7 @@
                 aria-label={`Value, row ${index + 1}`}
                 autocomplete="off"
                 spellcheck="false"
+                maxlength={100000}
               />
             </td>
             <td class="secret-col">
@@ -303,6 +434,7 @@
                 onclick={() => removeRow(index)}
                 aria-label={`Remove ${trimmed || `row ${index + 1}`}`}
                 title="Remove row"
+                disabled={isDraft}
               >
                 ×
               </button>
@@ -314,10 +446,16 @@
   </div>
 
   <footer class="footer">
-    <p class="note" data-tone={note.tone} aria-live="polite">{note.text}</p>
+    <p
+      class="note"
+      data-tone={note.tone}
+      aria-live="polite"
+      aria-atomic="true"
+      title={note.text}
+    >{note.text}</p>
 
     <div class="actions">
-      <p class="count">
+      <p class="count" aria-live="polite" aria-atomic="true">
         <strong>{rows.length}</strong>
         {rows.length === 1 ? 'row' : 'rows'}
         {#if selected.length}
@@ -329,15 +467,16 @@
         <button
           class="btn ghost danger-text"
           type="button"
-          disabled={selected.length === 0}
+          disabled={selected.length === 0 || syncing}
           onclick={deleteSelected}
+          aria-label={`Delete ${selected.length} selected row${selected.length === 1 ? '' : 's'}`}
         >
           Delete selected
         </button>
         <button
           class="btn ghost"
           type="button"
-          disabled={selected.length === 0}
+          disabled={selected.length === 0 || syncing}
           onclick={() => toggleSecret(selected)}
         >
           {selected.some((i) => rows[i]?.is_secret) ? 'Unset secret' : 'Set secret'}
@@ -346,18 +485,24 @@
 
       <div class="btn-group">
         <button
+          id="clear-btn"
           class="btn"
           type="button"
           disabled={!connected || syncing}
-          onclick={() => (confirmAction = 'clear')}
+          onclick={() => openConfirm('clear')}
+          aria-label="Clear all variables from Cloudflare"
+          title={!connected ? 'Not connected to Cloudflare' : undefined}
         >
           Clear all
         </button>
         <button
+          id="sync-btn"
           class="btn primary"
           type="button"
-          disabled={!connected || syncing || issues.length > 0 || payload.length === 0}
-          onclick={() => (confirmAction = 'sync')}
+          disabled={!canSync}
+          onclick={() => openConfirm('sync')}
+          aria-label={issues.length > 0 ? firstIssue ?? 'Fix errors before syncing' : `Sync ${payload.length} variable${payload.length === 1 ? '' : 's'} to Cloudflare (Ctrl+Enter)`}
+          title={!connected ? 'Not connected to Cloudflare' : issues.length > 0 ? (firstIssue ?? 'Fix errors first') : payload.length === 0 ? 'Add at least one variable' : 'Sync (Ctrl+Enter)'}
         >
           {syncing ? 'Working…' : 'Sync'}
         </button>
@@ -366,16 +511,30 @@
   </footer>
 
   {#if confirmAction}
-    <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="overlay"
+      role="dialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="confirm-title"
+      aria-describedby="confirm-desc"
+      onkeydown={trapFocus}
+      onclick={(e) => {
+        if (e.target === e.currentTarget) cancelConfirm();
+      }}
+      bind:this={dialogEl}
+    >
       <div class="dialog">
         <h2 id="confirm-title">
           {confirmAction === 'clear' ? 'Clear all variables?' : 'Sync variables?'}
         </h2>
-        <p>
+        <p id="confirm-desc">
           {#if confirmAction === 'clear'}
-            This will delete all build variables and secrets from the Cloudflare dashboard. This cannot be undone.
+            This will delete all build variables and secrets from Cloudflare. You will still need to save in the dashboard. This cannot be undone.
           {:else}
-            This will delete all existing build variables and replace them with the {payload.length} row{payload.length === 1 ? '' : 's'} listed above.
+            This will delete all existing build variables and fill in {payload.length}
+            {payload.length === 1 ? 'variable' : 'variables'}. You will still need to save in Cloudflare.
           {/if}
         </p>
         <div class="dialog-actions">
