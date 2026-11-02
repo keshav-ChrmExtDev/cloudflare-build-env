@@ -30,6 +30,7 @@ jobs:
           name: chrome-extension
           path: .output/*-chrome.zip
           include-hidden-files: true  
+          archive: false
 
       - name: Upload Firefox Extension
         uses: actions/upload-artifact@v7
@@ -37,6 +38,7 @@ jobs:
           name: firefox-extension
           path: .output/*-firefox.zip
           include-hidden-files: true  
+          archive: false
 
       - name: Upload Sources
         uses: actions/upload-artifact@v7
@@ -44,6 +46,7 @@ jobs:
           name: extension-sources
           path: .output/*-sources.zip
           include-hidden-files: true  
+          archive: false
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v3
